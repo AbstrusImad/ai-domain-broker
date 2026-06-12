@@ -106,7 +106,11 @@ export function NegotiationConsole({
         <AnimatePresence mode="wait">
           {showOrbit ? (
             <motion.div key="orbit" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-              <ValidatorOrbit phase={negotiation.phase} txHash={negotiation.txHash} />
+              <ValidatorOrbit
+                phase={negotiation.phase}
+                txHash={negotiation.txHash}
+                draft={negotiation.draft}
+              />
             </motion.div>
           ) : showVerdict ? (
             <motion.div key="verdict" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>

@@ -9,6 +9,7 @@ import { createClient } from 'genlayer-js'
 import { localnet, studionet, testnetBradbury } from 'genlayer-js/chains'
 import { TransactionStatus, type TransactionHash } from 'genlayer-js/types'
 import type { DomainInfo, MarketStats, NegotiationEntry } from './types'
+import { toAtto } from './format'
 
 export type { TransactionHash }
 
@@ -184,6 +185,156 @@ export async function waitForTx(
     interval: opts.interval ?? (accepted ? 5000 : 8000),
     retries: opts.retries ?? (accepted ? 48 : 75),
   })
+}
+
+// ----------------------------------------------------------------
+// Live transaction polling (gen_getTransactionByHash)
+//
+// Unlike gen_call, this RPC does NOT execute the GenVM, so it escapes the
+// aggressive gen_call rate limit. Bonus: while consensus is still running,
+// the leader's nondet output is already visible at
+// consensus_data.leader_receipt[0].eq_outputs["0"] (base64). Decoding it and
+// walking back to the JSON object reveals ARIA's draft verdict BEFORE the
+// transaction reaches ACCEPTED.
+// ----------------------------------------------------------------
+
+export interface LeaderDraft {
+  decision: 'ACCEPT' | 'REJECT' | 'COUNTER_OFFER'
+  counterAtto: string
+  note: string
+}
+
+const TERMINAL_STATUSES = new Set([
+  'ACCEPTED',
+  'FINALIZED',
+  'UNDETERMINED',
+  'CANCELED',
+  'LEADER_TIMEOUT',
+  'VALIDATORS_TIMEOUT',
+])
+
+const STATUS_BY_CODE: Record<number, string> = {
+  0: 'UNINITIALIZED',
+  1: 'PENDING',
+  2: 'PROPOSING',
+  3: 'COMMITTING',
+  4: 'REVEALING',
+  5: 'ACCEPTED',
+  6: 'UNDETERMINED',
+  7: 'FINALIZED',
+  8: 'CANCELED',
+  9: 'APPEAL_REVEALING',
+  10: 'APPEAL_COMMITTING',
+  11: 'READY_TO_FINALIZE',
+  12: 'VALIDATORS_TIMEOUT',
+  13: 'LEADER_TIMEOUT',
+}
+
+/** Tolerant property access: genlayer-js decodes some dicts as Map. */
+function mGet(o: unknown, key: string): unknown {
+  if (o instanceof Map) return o.get(key)
+  if (o && typeof o === 'object') return (o as Record<string, unknown>)[key]
+  return undefined
+}
+
+function statusName(raw: unknown): string {
+  if (typeof raw === 'number') return STATUS_BY_CODE[raw] ?? String(raw)
+  const s = String(raw ?? '').toUpperCase()
+  if (/^\d+$/.test(s)) return STATUS_BY_CODE[Number(s)] ?? s
+  return s
+}
+
+function b64ToString(b64: string): string {
+  try {
+    const bin = atob(b64)
+    const bytes = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+    return new TextDecoder('utf-8', { fatal: false }).decode(bytes)
+  } catch {
+    return ''
+  }
+}
+
+/** The decoded calldata wraps the JSON — walk back to the last '{' and parse. */
+function scanJsonObject(text: string): Record<string, unknown> | null {
+  for (let i = text.lastIndexOf('{'); i >= 0; i = text.lastIndexOf('{', i - 1)) {
+    for (let j = text.indexOf('}', i); j !== -1; j = text.indexOf('}', j + 1)) {
+      try {
+        const obj = JSON.parse(text.slice(i, j + 1)) as Record<string, unknown>
+        if (obj && typeof obj === 'object' && obj.decision != null) return obj
+      } catch {
+        /* keep scanning */
+      }
+    }
+  }
+  return null
+}
+
+/** Extract ARIA's draft verdict from the leader receipt of an in-flight tx. */
+export function extractLeaderDraft(tx: unknown): LeaderDraft | null {
+  try {
+    const cd = mGet(tx, 'consensus_data')
+    let lr = mGet(cd, 'leader_receipt')
+    if (Array.isArray(lr)) lr = lr[0]
+    const eq = mGet(lr, 'eq_outputs')
+    let candidates: unknown[] = []
+    if (eq instanceof Map) candidates = [...eq.values()]
+    else if (eq && typeof eq === 'object') candidates = Object.values(eq)
+    for (const c of candidates) {
+      if (typeof c !== 'string' || !c) continue
+      const obj = scanJsonObject(b64ToString(c))
+      if (!obj) continue
+      const decision = String(obj.decision ?? '')
+        .toUpperCase()
+        .replace(/\s+/g, '_')
+      if (!['ACCEPT', 'REJECT', 'COUNTER_OFFER'].includes(decision)) continue
+      let counterAtto = '0'
+      if (obj.counter_atto != null) counterAtto = String(obj.counter_atto)
+      else if (obj.counter_price_gen != null) {
+        counterAtto = toAtto(String(obj.counter_price_gen)).toString()
+      }
+      const note = String(obj.note ?? obj.justification ?? '').trim()
+      return { decision: decision as LeaderDraft['decision'], counterAtto, note }
+    }
+  } catch {
+    /* tolerate any receipt shape */
+  }
+  return null
+}
+
+/**
+ * Poll gen_getTransactionByHash until the tx reaches a terminal status.
+ * Reports the live status and the leader's draft verdict as soon as it
+ * appears — long before ACCEPTED.
+ */
+export async function pollTransactionUntilDecided(
+  client: GenLayerClient,
+  hash: TransactionHash,
+  opts: {
+    interval?: number
+    maxTries?: number
+    onUpdate?: (status: string, draft: LeaderDraft | null) => void
+  } = {},
+): Promise<{ status: string; draft: LeaderDraft | null }> {
+  const interval = opts.interval ?? 8000
+  const maxTries = opts.maxTries ?? 110
+  let draft: LeaderDraft | null = null
+  let status = 'PENDING'
+  for (let i = 0; i < maxTries; i++) {
+    try {
+      const tx = (await client.getTransaction({ hash })) as unknown
+      if (tx) {
+        status = statusName(mGet(tx, 'status'))
+        if (!draft) draft = extractLeaderDraft(tx)
+        opts.onUpdate?.(status, draft)
+        if (TERMINAL_STATUSES.has(status)) return { status, draft }
+      }
+    } catch {
+      /* transient RPC hiccup — keep polling */
+    }
+    await new Promise((r) => setTimeout(r, interval))
+  }
+  return { status, draft }
 }
 
 /**

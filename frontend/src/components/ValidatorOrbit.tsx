@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
 import type { NegotiationPhase } from '../lib/types'
-import type { TransactionHash } from '../lib/genlayer'
+import type { LeaderDraft, TransactionHash } from '../lib/genlayer'
+import { fromAtto } from '../lib/format'
 
 const PHASE_LINES: Record<string, string[]> = {
   wallet: [
@@ -26,16 +27,25 @@ const VALIDATORS = ['V1', 'V2', 'V3', 'V4', 'V5']
 interface Props {
   phase: NegotiationPhase
   txHash: TransactionHash | null
+  draft?: LeaderDraft | null
 }
 
 /**
  * Full negotiation theater: pulsing AI core, orbiting rings, validator nodes
  * scanning, and cycling status lines tied to the real transaction lifecycle.
  */
-export function ValidatorOrbit({ phase, txHash }: Props) {
+export function ValidatorOrbit({ phase, txHash, draft }: Props) {
   const [lineIdx, setLineIdx] = useState(0)
   const [typed, setTyped] = useState('')
-  const lines = PHASE_LINES[phase] ?? PHASE_LINES.consensus
+  // Once the leader's draft verdict is visible, the story changes: the
+  // validators are now verifying a concrete proposal.
+  const lines = draft
+    ? [
+        'Leader sealed a draft verdict…',
+        'Validators re-run the negotiation to verify it…',
+        'Cross-checking decisions under Optimistic Democracy…',
+      ]
+    : (PHASE_LINES[phase] ?? PHASE_LINES.consensus)
 
   // Cycle through status lines
   useEffect(() => {
@@ -86,6 +96,23 @@ export function ValidatorOrbit({ phase, txHash }: Props) {
               : 'transaction in flight'}
         </div>
       </div>
+
+      {draft && (
+        <motion.div
+          initial={{ opacity: 0, scale: 0.85, y: 10 }}
+          animate={{ opacity: 1, scale: 1, y: 0 }}
+          transition={{ type: 'spring', stiffness: 300, damping: 20 }}
+          style={{ textAlign: 'center' }}
+        >
+          <span className={`verdict-chip ${draft.decision}`} style={{ fontSize: 12, padding: '6px 16px' }}>
+            leader proposes: {draft.decision.replace('_', '-')}
+            {draft.decision === 'COUNTER_OFFER' && ` · ${fromAtto(draft.counterAtto)} GEN`}
+          </span>
+          <div className="mono" style={{ marginTop: 8, fontSize: 11, color: 'var(--txt-faint)' }}>
+            awaiting validator agreement to make it final
+          </div>
+        </motion.div>
+      )}
 
       <div className="validators-row">
         {VALIDATORS.map((v, i) => (

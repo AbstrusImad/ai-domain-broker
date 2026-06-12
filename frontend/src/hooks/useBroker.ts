@@ -5,11 +5,13 @@ import {
   fetchDomains,
   fetchNegotiations,
   fetchStats,
+  pollTransactionUntilDecided,
   sendBid,
   sendDelist,
   sendRegisterDomain,
   waitForTx,
   withRpcRetry,
+  type LeaderDraft,
   type TransactionHash,
 } from '../lib/genlayer'
 import type {
@@ -29,6 +31,8 @@ export interface NegotiationState {
   txHash: TransactionHash | null
   verdict: NegotiationEntry | null
   error: string | null
+  /** ARIA's draft verdict peeked from the leader receipt mid-consensus. */
+  draft?: LeaderDraft | null
 }
 
 const IDLE: NegotiationState = { phase: 'idle', txHash: null, verdict: null, error: null }
@@ -141,48 +145,95 @@ export function useBroker(walletAddress: string | null) {
           )
         }, 4000)
 
-        // LLM + consensus + possible leader rotations: allow up to ~15 min.
-        await waitForTx(client, hash, 'ACCEPTED', { interval: 9000, retries: 100 })
-
-        // The verdict lives in the on-chain chronicle. Entries are
-        // append-only, so the newest entry by this wallet is ours.
-        let verdict: NegotiationEntry | null = null
-        for (let attempt = 0; attempt < 8 && !verdict; attempt++) {
-          await new Promise((r) => setTimeout(r, attempt === 0 ? 1500 : 5000))
-          const after = await withRpcRetry(() => fetchNegotiations(readClient, domain), 2)
-          verdict =
-            [...after].reverse().find((e) => isSameAddr(e.bidder, walletAddress)) ?? null
-        }
-
+        // Poll gen_getTransactionByHash (no GenVM execution → no gen_call
+        // rate limit). The leader's draft verdict streams in mid-consensus.
+        const { status, draft } = await pollTransactionUntilDecided(client, hash, {
+          interval: 8000,
+          maxTries: 110, // ~15 min
+          onUpdate: (_st, d) => {
+            if (!aliveRef.current) return
+            setNegotiation((s) =>
+              s.txHash === hash ? { ...s, phase: 'consensus', draft: d } : s,
+            )
+          },
+        })
         if (!aliveRef.current) return
-        if (!verdict) {
-          setNegotiation({
-            phase: 'error',
-            txHash: hash,
-            verdict: null,
-            error:
-              'The transaction was accepted but the verdict could not be read yet (RPC busy). Close this panel and reopen the negotiation in a minute — your verdict is on-chain.',
-          })
+
+        if (status === 'ACCEPTED' || status === 'FINALIZED') {
+          // Authoritative verdict from the on-chain chronicle (it includes
+          // the deterministic backstops). Entries are append-only, so the
+          // newest entry by this wallet is ours.
+          let verdict: NegotiationEntry | null = null
+          for (let attempt = 0; attempt < 5 && !verdict; attempt++) {
+            await new Promise((r) => setTimeout(r, attempt === 0 ? 1500 : 6000))
+            try {
+              const after = await withRpcRetry(
+                () => fetchNegotiations(readClient, domain),
+                2,
+              )
+              verdict =
+                [...after].reverse().find((e) => isSameAddr(e.bidder, walletAddress)) ??
+                null
+            } catch {
+              /* gen_call busy — the draft fallback below still resolves */
+            }
+          }
+
+          // gen_call rate-limited? The leader draft is still a faithful
+          // verdict (consensus agreed with it) — synthesize the entry.
+          if (!verdict && draft) {
+            verdict = {
+              i: -1,
+              domain,
+              bidder: walletAddress,
+              bid: bidWei.toString(),
+              decision: draft.decision,
+              counter: draft.counterAtto,
+              pitch,
+              note: draft.note || 'Verdict sealed on-chain.',
+              auto: false,
+            }
+          }
+
+          if (!aliveRef.current) return
+          if (!verdict) {
+            setNegotiation({
+              phase: 'error',
+              txHash: hash,
+              verdict: null,
+              error:
+                'The transaction was accepted but the verdict could not be read yet (RPC busy). Reopen this negotiation in a minute — your verdict is on-chain.',
+            })
+            return
+          }
+          setNegotiation({ phase: 'verdict', txHash: hash, verdict, error: null })
+          void refresh()
+          void refreshStats()
           return
         }
-        setNegotiation({ phase: 'verdict', txHash: hash, verdict, error: null })
-        void refresh()
-        void refreshStats()
-      } catch (e) {
-        if (!aliveRef.current) return
-        const raw = e instanceof Error ? e.message : 'The negotiation failed.'
-        const timedOut = /status is not ACCEPTED|not FINALIZED/i.test(raw)
-        const rateLimited = /rate limit|429/i.test(raw)
+
+        // Terminal but not accepted: nothing executed, escrow never left.
+        const friendly: Record<string, string> = {
+          LEADER_TIMEOUT:
+            'The network leader timed out before running the negotiation (Bradbury congestion). Nothing executed and your GEN never left your wallet — try again in a moment.',
+          VALIDATORS_TIMEOUT:
+            'The validators timed out during consensus. Nothing executed and your GEN is safe — try again in a moment.',
+          UNDETERMINED:
+            'The validators could not agree on a verdict. Your escrow was not taken — try again (a clearer pitch helps consensus).',
+          CANCELED: 'The transaction was canceled. Your GEN is safe.',
+        }
         setNegotiation({
           phase: 'error',
           txHash: hash,
           verdict: null,
-          error: timedOut
-            ? 'The network is congested (leader timeout) and the verdict is still pending. Your escrowed GEN is safe: if the negotiation fails, nothing leaves your wallet. Reopen this negotiation later to see the result.'
-            : rateLimited
-              ? 'The RPC rate-limited us while waiting. Your bid is in flight and your GEN is safe — reopen this negotiation in a few minutes to see the verdict.'
-              : raw,
+          error:
+            friendly[status] ??
+            `The negotiation is still ${status || 'pending'} after 15 minutes. Your GEN is safe — reopen this negotiation later to see the result.`,
         })
+      } catch (e) {
+        if (!aliveRef.current) return
+        const raw = e instanceof Error ? e.message : 'The negotiation failed.'
+        setNegotiation({ phase: 'error', txHash: hash, verdict: null, error: raw })
       }
     },
     [walletAddress, readClient, refresh, refreshStats],
