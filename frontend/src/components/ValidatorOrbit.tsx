@@ -28,24 +28,33 @@ interface Props {
   phase: NegotiationPhase
   txHash: TransactionHash | null
   draft?: LeaderDraft | null
+  liveStatus?: string
 }
 
 /**
  * Full negotiation theater: pulsing AI core, orbiting rings, validator nodes
  * scanning, and cycling status lines tied to the real transaction lifecycle.
  */
-export function ValidatorOrbit({ phase, txHash, draft }: Props) {
+export function ValidatorOrbit({ phase, txHash, draft, liveStatus }: Props) {
   const [lineIdx, setLineIdx] = useState(0)
   const [typed, setTyped] = useState('')
+  const rotating = liveStatus === 'LEADER_TIMEOUT' || liveStatus === 'VALIDATORS_TIMEOUT'
   // Once the leader's draft verdict is visible, the story changes: the
-  // validators are now verifying a concrete proposal.
-  const lines = draft
+  // validators are now verifying a concrete proposal. Leader rotations get
+  // their own honest storyline — the network retries automatically.
+  const lines = rotating
     ? [
-        'Leader sealed a draft verdict…',
-        'Validators re-run the negotiation to verify it…',
-        'Cross-checking decisions under Optimistic Democracy…',
+        'A node timed out — the network rotates to a new leader…',
+        'Your negotiation is retried automatically. Nothing is lost.',
+        'Re-running the broker under a fresh leader…',
       ]
-    : (PHASE_LINES[phase] ?? PHASE_LINES.consensus)
+    : draft
+      ? [
+          'Leader sealed a draft verdict…',
+          'Validators re-run the negotiation to verify it…',
+          'Cross-checking decisions under Optimistic Democracy…',
+        ]
+      : (PHASE_LINES[phase] ?? PHASE_LINES.consensus)
 
   // Cycle through status lines
   useEffect(() => {

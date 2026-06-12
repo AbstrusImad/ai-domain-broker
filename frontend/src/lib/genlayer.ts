@@ -204,14 +204,11 @@ export interface LeaderDraft {
   note: string
 }
 
-const TERMINAL_STATUSES = new Set([
-  'ACCEPTED',
-  'FINALIZED',
-  'UNDETERMINED',
-  'CANCELED',
-  'LEADER_TIMEOUT',
-  'VALIDATORS_TIMEOUT',
-])
+// LEADER_TIMEOUT / VALIDATORS_TIMEOUT are NOT terminal on Bradbury: the
+// consensus engine rotates to a new leader and retries the transaction
+// (observed live: a bid went LEADER_TIMEOUT → rotation → ACCEPTED with the
+// verdict on-chain). Keep polling through them.
+const TERMINAL_STATUSES = new Set(['ACCEPTED', 'FINALIZED', 'UNDETERMINED', 'CANCELED'])
 
 const STATUS_BY_CODE: Record<number, string> = {
   0: 'UNINITIALIZED',

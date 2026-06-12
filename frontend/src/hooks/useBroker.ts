@@ -33,6 +33,8 @@ export interface NegotiationState {
   error: string | null
   /** ARIA's draft verdict peeked from the leader receipt mid-consensus. */
   draft?: LeaderDraft | null
+  /** Raw lifecycle status from the network (PROPOSING, LEADER_TIMEOUT…). */
+  liveStatus?: string
 }
 
 const IDLE: NegotiationState = { phase: 'idle', txHash: null, verdict: null, error: null }
@@ -149,11 +151,13 @@ export function useBroker(walletAddress: string | null) {
         // rate limit). The leader's draft verdict streams in mid-consensus.
         const { status, draft } = await pollTransactionUntilDecided(client, hash, {
           interval: 8000,
-          maxTries: 110, // ~15 min
-          onUpdate: (_st, d) => {
+          maxTries: 150, // ~20 min — leader rotations restart the clock
+          onUpdate: (st, d) => {
             if (!aliveRef.current) return
             setNegotiation((s) =>
-              s.txHash === hash ? { ...s, phase: 'consensus', draft: d } : s,
+              s.txHash === hash
+                ? { ...s, phase: 'consensus', draft: d, liveStatus: st }
+                : s,
             )
           },
         })
@@ -214,10 +218,6 @@ export function useBroker(walletAddress: string | null) {
 
         // Terminal but not accepted: nothing executed, escrow never left.
         const friendly: Record<string, string> = {
-          LEADER_TIMEOUT:
-            'The network leader timed out before running the negotiation (Bradbury congestion). Nothing executed and your GEN never left your wallet — try again in a moment.',
-          VALIDATORS_TIMEOUT:
-            'The validators timed out during consensus. Nothing executed and your GEN is safe — try again in a moment.',
           UNDETERMINED:
             'The validators could not agree on a verdict. Your escrow was not taken — try again (a clearer pitch helps consensus).',
           CANCELED: 'The transaction was canceled. Your GEN is safe.',
@@ -228,7 +228,7 @@ export function useBroker(walletAddress: string | null) {
           verdict: null,
           error:
             friendly[status] ??
-            `The negotiation is still ${status || 'pending'} after 15 minutes. Your GEN is safe — reopen this negotiation later to see the result.`,
+            `The network is congested and the negotiation is still working (last status: ${status || 'pending'} — leader rotations retry automatically). Your GEN is safe. Reopen this negotiation in a few minutes: the verdict will appear in the chat history.`,
         })
       } catch (e) {
         if (!aliveRef.current) return

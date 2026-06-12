@@ -110,6 +110,7 @@ export function NegotiationConsole({
                 phase={negotiation.phase}
                 txHash={negotiation.txHash}
                 draft={negotiation.draft}
+                liveStatus={negotiation.liveStatus}
               />
             </motion.div>
           ) : showVerdict ? (
