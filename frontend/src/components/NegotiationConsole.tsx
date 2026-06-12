@@ -43,7 +43,8 @@ export function NegotiationConsole({
     negotiation.phase === 'submitted' ||
     negotiation.phase === 'consensus'
 
-  // Load this domain's negotiation chronicle
+  // Load this domain's negotiation chronicle once per domain (gen_call is
+  // rate-limited on Bradbury — never refetch on every phase change).
   useEffect(() => {
     let cancelled = false
     setLoadingHistory(true)
@@ -58,7 +59,21 @@ export function NegotiationConsole({
     return () => {
       cancelled = true
     }
-  }, [domain.name, fetchNegotiations, negotiation.phase])
+  }, [domain.name, fetchNegotiations])
+
+  // One extra reload only when a verdict lands (to show the new entry).
+  useEffect(() => {
+    if (negotiation.phase !== 'verdict') return
+    let cancelled = false
+    fetchNegotiations(domain.name)
+      .then((h) => {
+        if (!cancelled) setHistory(h)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [negotiation.phase, domain.name, fetchNegotiations])
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: 99999, behavior: 'smooth' })

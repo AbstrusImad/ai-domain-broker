@@ -199,7 +199,8 @@ export async function withRpcRetry<T>(fn: () => Promise<T>, attempts = 4): Promi
       const msg = e instanceof Error ? e.message : String(e)
       const rateLimited = /rate limit|429|exceeds defined limit|too many requests/i.test(msg)
       if (!rateLimited || i === attempts - 1) throw e
-      await new Promise((r) => setTimeout(r, 1200 * 2 ** i))
+      // gen_call limits on Bradbury reset per-minute: back off generously.
+      await new Promise((r) => setTimeout(r, 2500 * 2 ** i))
     }
   }
   throw lastErr
