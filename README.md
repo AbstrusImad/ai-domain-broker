@@ -6,6 +6,8 @@ Sellers list Web3 domains with a public asking price and a **confidential minimu
 
 Built on [GenLayer](https://genlayer.com) (Bradbury Testnet) — the negotiation verdict is not one model's opinion: every validator independently re-runs the negotiation and the verdicts must agree (Optimistic Democracy).
 
+> **Live on Bradbury Testnet:** `0x0Ec607dB8CD8693CfB34e714E2cb16cF4db8d62B` — deployed, `ACCEPTED` by validator consensus and verified with live reads.
+
 ---
 
 ## How a negotiation works
