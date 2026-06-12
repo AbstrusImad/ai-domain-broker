@@ -1,0 +1,16 @@
+# deps & builds
+node_modules/
+dist/
+.vercel/
+
+# env & secrets — never commit
+.env
+.env.*
+!.env.example
+*.key
+keystore*.json
+
+# misc
+.DS_Store
+*.log
+deploy_output.log
