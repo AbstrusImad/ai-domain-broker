@@ -233,7 +233,12 @@ export function useBroker(walletAddress: string | null) {
       } catch (e) {
         if (!aliveRef.current) return
         const raw = e instanceof Error ? e.message : 'The negotiation failed.'
-        setNegotiation({ phase: 'error', txHash: hash, verdict: null, error: raw })
+        const friendly = /LackOfFundForMaxFee|insufficient funds/i.test(raw)
+          ? 'Not enough GEN in your wallet. Bradbury reserves up to ~90 GEN as the max fee for AI transactions (most of it is refunded after execution), so you need your bid amount + fee headroom. Top up at the faucet: testnet-faucet.genlayer.foundation'
+          : /user rejected|denied/i.test(raw)
+            ? 'You rejected the transaction in your wallet.'
+            : raw
+        setNegotiation({ phase: 'error', txHash: hash, verdict: null, error: friendly })
       }
     },
     [walletAddress, readClient, refresh, refreshStats],
