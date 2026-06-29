@@ -302,7 +302,14 @@ export function extractLeaderDraft(tx: unknown): LeaderDraft | null {
 /**
  * Poll gen_getTransactionByHash until the tx reaches a terminal status.
  * Reports the live status and the leader's draft verdict as soon as it
- * appears — long before ACCEPTED.
+ * appears, long before ACCEPTED.
+ *
+ * Hardened so the UI can never hang forever: a terminal status is detected
+ * from the status name OR the raw numeric code, and if a `confirmVerdict`
+ * probe reports the verdict is already written to the on-chain chronicle, the
+ * poll resolves as ACCEPTED even when the receipt shape is unfamiliar (e.g.
+ * after a genlayer-js version bump). Every RPC error is swallowed and retried,
+ * never thrown, so a transient hiccup cannot break the loop.
  */
 export async function pollTransactionUntilDecided(
   client: GenLayerClient,
@@ -311,6 +318,7 @@ export async function pollTransactionUntilDecided(
     interval?: number
     maxTries?: number
     onUpdate?: (status: string, draft: LeaderDraft | null) => void
+    confirmVerdict?: () => Promise<boolean>
   } = {},
 ): Promise<{ status: string; draft: LeaderDraft | null }> {
   const interval = opts.interval ?? 8000
@@ -321,13 +329,30 @@ export async function pollTransactionUntilDecided(
     try {
       const tx = (await client.getTransaction({ hash })) as unknown
       if (tx) {
-        status = statusName(mGet(tx, 'status'))
+        const rawStatus = mGet(tx, 'status')
+        status = statusName(rawStatus)
         if (!draft) draft = extractLeaderDraft(tx)
         opts.onUpdate?.(status, draft)
-        if (TERMINAL_STATUSES.has(status)) return { status, draft }
+        // Terminal by name, or by raw numeric code (5/6/7/8) in case the
+        // status name map ever drifts from the runtime enum.
+        const code = typeof rawStatus === 'number' ? rawStatus : Number(rawStatus)
+        if (TERMINAL_STATUSES.has(status) || code === 5 || code === 6 || code === 7 || code === 8) {
+          return { status, draft }
+        }
       }
     } catch {
-      /* transient RPC hiccup — keep polling */
+      /* transient RPC hiccup, keep polling */
+    }
+    // Independent ground truth: if the verdict is already on-chain (the
+    // chronicle grew), the negotiation is decided regardless of receipt shape.
+    if (opts.confirmVerdict && i >= 1) {
+      try {
+        if (await opts.confirmVerdict()) {
+          return { status: status === 'PENDING' ? 'ACCEPTED' : status, draft }
+        }
+      } catch {
+        /* probe failed (rate limit), keep polling the receipt */
+      }
     }
     await new Promise((r) => setTimeout(r, interval))
   }

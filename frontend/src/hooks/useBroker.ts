@@ -135,6 +135,16 @@ export function useBroker(walletAddress: string | null) {
       if (!walletAddress) return
       setNegotiation({ phase: 'wallet', txHash: null, verdict: null, error: null })
       let hash: TransactionHash | null = null
+      // Count this wallet's existing verdicts on this domain BEFORE bidding,
+      // so the poll can detect the new one landing on-chain regardless of the
+      // transaction receipt shape.
+      let priorVerdictCount = 0
+      try {
+        const before = await fetchNegotiations(readClient, domain)
+        priorVerdictCount = before.filter((e) => isSameAddr(e.bidder, walletAddress)).length
+      } catch {
+        /* best-effort baseline */
+      }
       try {
         const client = createWalletClient(walletAddress)
         hash = await sendBid(client, domain, pitch, bidWei)
@@ -158,6 +168,15 @@ export function useBroker(walletAddress: string | null) {
               s.txHash === hash
                 ? { ...s, phase: 'consensus', draft: d, liveStatus: st }
                 : s,
+            )
+          },
+          // Ground truth: resolve as soon as a new verdict by this wallet is
+          // on-chain, even if the receipt status is unreadable.
+          confirmVerdict: async () => {
+            const now = await fetchNegotiations(readClient, domain)
+            return (
+              now.filter((e) => isSameAddr(e.bidder, walletAddress)).length >
+              priorVerdictCount
             )
           },
         })
